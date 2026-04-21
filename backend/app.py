@@ -1,63 +1,76 @@
 import os
-import sqlite3
 from datetime import datetime
-from dotenv import load_dotenv # New Import
-from flask import Flask, request, jsonify, send_from_directory
+from dotenv import load_dotenv
+from flask import Flask, request, jsonify
 from flask_login import LoginManager, UserMixin, login_user, login_required, logout_user
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import check_password_hash
 from groq import Groq
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # === Load Environment Variables ===
 load_dotenv()
 
 # === App Configuration ===
 app = Flask(__name__)
-app.secret_key = os.environ.get('SECRET_KEY')
+app.secret_key = os.environ.get('FLASK_SECRET')
 
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # === Database Configuration ===
-DB_PATH = 'messages.db'
+DB_URL = os.environ.get('DATABASE_URL')
 
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    # Connects to Supabase PostgreSQL
+    conn = psycopg2.connect(DB_URL)
     return conn
 
 def init_db():
-    with get_db() as conn:
-        conn.executescript('''
-            CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
-                email TEXT NOT NULL,
-                subject TEXT NOT NULL,
-                message TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS site_visits (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ip_address TEXT,
-                visit_date DATE DEFAULT CURRENT_DATE
-            );
-            CREATE TABLE IF NOT EXISTS button_clicks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                button_name TEXT NOT NULL,
-                click_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS projects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT NOT NULL,
-                technologies TEXT NOT NULL,
-                description TEXT NOT NULL,
-                category TEXT NOT NULL,
-                image TEXT,
-                link TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        ''')
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    CREATE TABLE IF NOT EXISTS messages (
+                        id SERIAL PRIMARY KEY,
+                        name TEXT NOT NULL,
+                        email TEXT NOT NULL,
+                        subject TEXT NOT NULL,
+                        message TEXT NOT NULL,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE IF NOT EXISTS site_visits (
+                        id SERIAL PRIMARY KEY,
+                        ip_address TEXT,
+                        visit_date DATE DEFAULT CURRENT_DATE
+                    );
+                    CREATE TABLE IF NOT EXISTS button_clicks (
+                        id SERIAL PRIMARY KEY,
+                        button_name TEXT NOT NULL,
+                        click_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE IF NOT EXISTS projects (
+                        id SERIAL PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        technologies TEXT NOT NULL,
+                        description TEXT NOT NULL,
+                        category TEXT NOT NULL,
+                        image TEXT,
+                        link TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                    CREATE TABLE IF NOT EXISTS admin (
+                    id SERIAL PRIMARY KEY,
+                    user_name TEXT UNIQUE NOT NULL,
+                    pwd_hash TEXT NOT NULL
+                    );
+                ''')
+            conn.commit()
+            print("Neural Registry Initialized on Supabase.")
+    except Exception as e:
+        print(f"Database Migration Error: {e}")
+
 init_db()
 
 # === Auth Setup ===
@@ -66,12 +79,6 @@ login_manager = LoginManager(app)
 class User(UserMixin):
     def __init__(self, id):
         self.id = id
-
-# Pulling Admin credentials from ENV
-ADMIN_DB = {
-    "username": os.environ.get('ADMIN_USERNAME'),
-    "password_hash": os.environ.get('ADMIN_PASSWORD_HASH') 
-}
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -83,17 +90,19 @@ def load_user(user_id):
 def api_get_projects():
     category = request.args.get('category')
     query = 'SELECT * FROM projects'
-    params = ()
+    params = []
     
     if category:
-        query += ' WHERE category = ?'
-        params = (category,)
+        query += ' WHERE category = %s'
+        params.append(category)
     
     query += ' ORDER BY created_at DESC'
     
     with get_db() as conn:
-        projects = conn.execute(query, params).fetchall()
-    return jsonify([dict(p) for p in projects])
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(query, params)
+            projects = cur.fetchall()
+    return jsonify(projects)
 
 @app.route('/api/send_message', methods=['POST'])
 def api_send_message():
@@ -108,22 +117,22 @@ def api_send_message():
         subject = data.get('subject', 'System Inquiry') 
 
         with get_db() as conn:
-            conn.execute('''INSERT INTO messages (name, email, subject, message)
-                            VALUES (?, ?, ?, ?)''', 
-                         (name, email, subject, message))
+            with conn.cursor() as cur:
+                cur.execute('''INSERT INTO messages (name, email, subject, message)
+                                VALUES (%s, %s, %s, %s)''', 
+                             (name, email, subject, message))
             conn.commit()
-            
         return jsonify({'status': 'success', 'message': 'Message sent to the neural grid!'}), 201
     except Exception as e:
-        return jsonify({'status': 'error', 'message': 'Database insertion failed'}), 500
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/api/admin/messages/<int:id>', methods=['DELETE', 'OPTIONS'])
 def delete_message(id):
-    if request.method == 'OPTIONS':
-        return jsonify({'status': 'ok'}), 200
+    if request.method == 'OPTIONS': return jsonify({'status': 'ok'}), 200
     try:
         with get_db() as conn:
-            conn.execute('DELETE FROM messages WHERE id = ?', (id,))
+            with conn.cursor() as cur:
+                cur.execute('DELETE FROM messages WHERE id = %s', (id,))
             conn.commit()
         return jsonify({'status': 'success', 'message': 'Signal purged'}), 200
     except Exception as e:
@@ -132,21 +141,22 @@ def delete_message(id):
 @app.route('/api/visit_stats', methods=['GET'])
 def get_public_stats():
     with get_db() as conn:
-        count = conn.execute('SELECT COUNT(*) FROM site_visits').fetchone()[0]
+        with conn.cursor() as cur:
+            cur.execute('SELECT COUNT(*) FROM site_visits')
+            count = cur.fetchone()[0]
     return jsonify({'total_visits': count})
 
 @app.route('/api/track_visit', methods=['POST'])
 def api_track_visit():
     ip = request.headers.get('X-Forwarded-For', request.remote_addr)
     with get_db() as conn:
-        exists = conn.execute(
-            'SELECT id FROM site_visits WHERE ip_address = ? AND visit_date = CURRENT_DATE', 
-            (ip,)
-        ).fetchone()
-        if not exists:
-            conn.execute('INSERT INTO site_visits (ip_address, visit_date) VALUES (?, CURRENT_DATE)', (ip,))
-            conn.commit()
-            return jsonify({'status': 'success', 'message': 'New visit logged.'})
+        with conn.cursor() as cur:
+            cur.execute('SELECT id FROM site_visits WHERE ip_address = %s AND visit_date = CURRENT_DATE', (ip,))
+            exists = cur.fetchone()
+            if not exists:
+                cur.execute('INSERT INTO site_visits (ip_address, visit_date) VALUES (%s, CURRENT_DATE)', (ip,))
+                conn.commit()
+                return jsonify({'status': 'success', 'message': 'New visit logged.'})
     return jsonify({'status': 'success', 'message': 'Returning visitor.'})
 
 @app.route('/api/track_click', methods=['POST'])
@@ -155,24 +165,56 @@ def api_track_click():
     button_name = data.get('button_name') if data else None
     if button_name:
         with get_db() as conn:
-            conn.execute('INSERT INTO button_clicks (button_name) VALUES (?)', (button_name,))
+            with conn.cursor() as cur:
+                cur.execute('INSERT INTO button_clicks (button_name) VALUES (%s)', (button_name,))
+            conn.commit()
         return jsonify({'status': 'success'})
     return jsonify({'status': 'error'}), 400
+
 
 # === Admin API Routes ===
 
 @app.route('/api/admin/login', methods=['POST'])
 def api_login():
     data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"success": False, "message": "No data received"}), 400
+    if not data: 
+        return jsonify({"success": False, "message": "No signal detected"}), 400
+    
     username = data.get('username')
     password = data.get('password')
-    if username == ADMIN_DB["username"] and check_password_hash(ADMIN_DB["password_hash"], password):
-        user = User(1)
-        login_user(user, remember=True)
-        return jsonify({"success": True, "message": "Welcome back, Kwesi"})
-    return jsonify({"success": False, "message": "Invalid credentials"}), 401
+
+    try:
+        admin_user = None
+        with get_db() as conn:
+            # Using RealDictCursor allows admin_user['id'] syntax
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute('SELECT * FROM admin WHERE user_name = %s', (username,))
+                admin_user = cur.fetchone()
+
+        # Debug: See if the user was even found
+        if not admin_user:
+            print(f"Login failed: User '{username}' not found in database.")
+            return jsonify({"success": False, "message": "Invalid credentials"}), 401
+
+        # Check password hash
+        if check_password_hash(admin_user['pwd_hash'], password):
+            # 1. Create user object
+            user = User(admin_user['id'])
+            
+            # 2. Log them in (This requires app.secret_key to be set!)
+            login_user(user, remember=True)
+            
+            return jsonify({"success": True, "message": f"Welcome back, {username}"})
+        
+        print(f"Login failed: Password mismatch for '{username}'.")
+        return jsonify({"success": False, "message": "Invalid credentials"}), 401
+
+    except Exception as e:
+        # This will print the full error to your VS Code terminal
+        import traceback
+        traceback.print_exc() 
+        return jsonify({"success": False, "message": f"Server Error: {str(e)}"}), 500
+    
 
 @app.route('/api/logout')
 @login_required
@@ -184,130 +226,106 @@ def api_logout():
 @login_required
 def api_metrics():
     with get_db() as conn:
-        msg_count = conn.execute('SELECT COUNT(*) FROM messages').fetchone()[0]
-        visit_count = conn.execute('SELECT COUNT(*) FROM site_visits').fetchone()[0]
-        monthly_v = conn.execute("SELECT strftime('%Y-%m', visit_date), COUNT(*) FROM site_visits GROUP BY 1").fetchall()
-        cat_counts = conn.execute('SELECT category, COUNT(*) FROM projects GROUP BY category').fetchall()
-        projects_query = conn.execute('SELECT * FROM projects ORDER BY id DESC').fetchall()
-        all_projects = [dict(p) for p in projects_query]
-        messages = conn.execute('SELECT * FROM messages ORDER BY created_at DESC LIMIT 50').fetchall()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute('SELECT COUNT(*) as count FROM messages')
+            msg_count = cur.fetchone()['count']
+            
+            cur.execute('SELECT COUNT(*) as count FROM site_visits')
+            visit_count = cur.fetchone()['count']
+            
+            # strftime is SQLite; PostgreSQL uses TO_CHAR
+            cur.execute("SELECT TO_CHAR(visit_date, 'YYYY-MM') as month, COUNT(*) FROM site_visits GROUP BY 1")
+            monthly_v = cur.fetchall()
+            
+            cur.execute('SELECT category, COUNT(*) FROM projects GROUP BY category')
+            cat_counts = dict(cur.fetchall())
+            
+            cur.execute('SELECT * FROM projects ORDER BY id DESC')
+            all_projects = cur.fetchall()
+            
+            cur.execute('SELECT * FROM messages ORDER BY created_at DESC LIMIT 50')
+            messages = cur.fetchall()
+            
     return jsonify({
         'total_messages': msg_count,
         'total_visits': visit_count,
-        'monthly_visits': [list(v) for v in monthly_v],
-        'category_counts': dict(cat_counts),
-        'recent_messages': [dict(m) for m in messages],
+        'monthly_visits': monthly_v,
+        'category_counts': cat_counts,
+        'recent_messages': messages,
         'all_projects': all_projects
     })
 
 @app.route('/api/admin/projects', methods=['POST'])
 @login_required
 def api_manage_project():
-    pid = request.form.get('id')
-    title = request.form.get('title')
-    desc = request.form.get('description')
-    cat = request.form.get('category')
-    link = request.form.get('link')
-    tech = request.form.get('technologies')
+    # 1. Check for JSON data first, then Fallback to Form data
+    data = request.get_json(silent=True) or request.form
+    
+    pid = data.get('id')
+    title = data.get('title')
+    desc = data.get('description')
+    cat = data.get('category')
+    link = data.get('link')
+    tech = data.get('technologies')
+    
+    # Handle Image Logic
     image_file = request.files.get('image')
-    image_url = request.form.get('existing_image')
+    image_url = data.get('existing_image') or data.get('image')
+
     if image_file and image_file.filename:
         filename = secure_filename(image_file.filename)
         upload_path = os.path.join('static', 'uploads')
         os.makedirs(upload_path, exist_ok=True)
         image_file.save(os.path.join(upload_path, filename))
         image_url = f'/static/uploads/{filename}'
-    with get_db() as conn:
-        if pid:
-            conn.execute('UPDATE projects SET title=?, description=?, category=?, image=?, link=?, technologies=? WHERE id=?',
-                         (title, desc, cat, image_url, link, tech, pid))
-        else:
-            conn.execute('INSERT INTO projects (title, description, category, image, link, technologies) VALUES (?,?,?,?,?,?)',
-                         (title, desc, cat, image_url, link, tech))
-    return jsonify({"status": "success"})
 
-@app.route('/api/admin/projects/<int:id>', methods=['DELETE', 'OPTIONS'])
-@login_required 
-def delete_project(id):
-    if request.method == 'OPTIONS': return jsonify({'ok': True}), 200
+    # 2. Validation Check
+    if not title or not desc:
+        return jsonify({"status": "error", "message": "Title and Description are required"}), 400
+
     try:
         with get_db() as conn:
-            conn.execute('DELETE FROM projects WHERE id = ?', (id,))
-            conn.commit()
-        return jsonify({'status': 'success'}), 200
+            with conn.cursor() as cur:
+                if pid:
+                    # Update Existing
+                    cur.execute('''
+                        UPDATE projects 
+                        SET title=%s, description=%s, category=%s, image=%s, link=%s, technologies=%s 
+                        WHERE id=%s
+                    ''', (title, desc, cat, image_url, link, tech, pid))
+                else:
+                    # Insert New
+                    cur.execute('''
+                        INSERT INTO projects (title, description, category, image, link, technologies) 
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                    ''', (title, desc, cat, image_url, link, tech))
+                conn.commit()
+        return jsonify({"status": "success", "message": "Project protocol updated."})
     except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        print(f"DATABASE ERROR: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
 
-@app.route('/api/admin/projects/<int:id>', methods=['PUT', 'OPTIONS'])
-@login_required
-def update_project(id):
-    if request.method == 'OPTIONS': return jsonify({'status': 'ok'}), 200
-    title = request.form.get('title')
-    category = request.form.get('category')
-    description = request.form.get('description')
-    link = request.form.get('link')
-    technologies = request.form.get('technologies')
-    image_file = request.files.get('image')
-    with get_db() as conn:
-        if image_file:
-            filename = secure_filename(image_file.filename)
-            upload_path = os.path.join('static', 'uploads')
-            image_file.save(os.path.join(upload_path, filename))
-            image_path = f'/static/uploads/{filename}'
-            conn.execute('''UPDATE projects SET title=?, category=?, description=?, link=?, image=?, technologies=? WHERE id=?''', 
-                         (title, category, description, link, image_path, technologies, id))
-        else:
-            conn.execute('''UPDATE projects SET title=?, category=?, description=?, link=?, technologies=? WHERE id=?''', 
-                         (title, category, description, link, technologies, id))
-        conn.commit()
-    return jsonify({"message": "Protocol updated successfully"}), 200
+# ... (AI Agent Routes follow the same Cursor pattern) ...
 
-@app.route('/download_cv')
-def download_cv():
-    return send_from_directory('docs', 'Kwesi_Coder_CV.pdf', as_attachment=True)
+chat_sessions={}
 
-
-#-----------------------------AI AGENT SETUP-----------------------------
-chat_sessions = {}
-
-# --- HELPER: DATA AGGREGATOR ---
 def get_neural_grid_context():
     try:
         with get_db() as conn:
-            # 1. Fetch site metrics
-            visit_count = conn.execute('SELECT COUNT(*) FROM site_visits').fetchone()[0]
-            
-            # 2. Fetch projects with all necessary columns for AI reasoning
-            # Make sure your 'projects' table has a 'technologies' or 'tags' column
-            query = "SELECT title, category, description, technologies, link FROM projects"
-            projects = conn.execute(query).fetchall()
-            
-            # 3. Build a high-fidelity string for the LLM
-            project_list = []
-            for p in projects:
-                # We combine title, category, tech, and info into a single line per project
-                # This helps the AI use 'internal scanning' to find keywords like "Django"
-                entry = (
-                    f"| PROJECT: {p['title']} "
-                    f"| CATEGORY: {p['category']} "
-                    f"| TECH: {p['technologies']} "
-                    f"| INFO: {p['description']} "
-                    f"| LINK: {p['link']}"
-                )
-                project_list.append(entry)
-            
-            # 4. Final summary construction
-            if project_list:
-                project_summary = "\n".join(project_list)
-            else:
-                project_summary = "Registry is currently empty. No projects found."
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute('SELECT COUNT(*) as count FROM site_visits')
+                visit_count = cur.fetchone()['count']
                 
-            return visit_count, project_summary
-
+                cur.execute("SELECT title, category, description, technologies, link FROM projects")
+                projects = cur.fetchall()
+                
+                project_list = [f"| PROJECT: {p['title']} | TECH: {p['technologies']} | INFO: {p['description']}" for p in projects]
+                project_summary = "\n".join(project_list) if project_list else "Registry empty."
+                
+                return visit_count, project_summary
     except Exception as e:
-        # Log the error to your console for debugging
-        print(f"DATABASE_READ_ERROR: {e}")
-        return 0, "Neural Registry is offline. Connection to database failed."
+        return 0, f"Error: {e}"
+    
 
 # --- THE AGENT ROUTE ---
 client = Groq(api_key=os.environ.get('GROQ_API_KEY'))
