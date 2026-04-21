@@ -1,0 +1,22 @@
+# Python/Flask
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+ENV/
+
+pip-log.txt
+
+# Databases (Ignore local SQLite to prevent overwriting production data)
+*.db
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Production Build
+dist/
+build/
