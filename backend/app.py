@@ -330,6 +330,82 @@ def api_manage_project():
     except Exception as e:
         print(f"DATABASE ERROR: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
+    
+    
+@app.route('/api/admin/projects/<int:project_id>', methods=['DELETE', 'OPTIONS'])
+@login_required
+def api_delete_project(project_id):
+    
+    # 1. Handle CORS Preflight
+    if request.method == 'OPTIONS':
+        return jsonify({"success": True}), 200
+
+    # 3. Execution Logic
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # Check if project exists first
+                cur.execute('SELECT id FROM projects WHERE id = %s', (project_id,))
+                if not cur.fetchone():
+                    return jsonify({"success": False, "message": "Project not found"}), 404
+
+                # Execute Delete
+                cur.execute('DELETE FROM projects WHERE id = %s', (project_id,))
+                conn.commit()
+                
+        return jsonify({"success": True, "message": f"Project {project_id} deleted successfully"})
+
+    except Exception as e:
+        print(f"Neural Registry Error: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+    
+
+@app.route('/api/admin/projects/<int:project_id>', methods=['PUT', 'OPTIONS'])
+@login_required
+def api_update_project(project_id):
+    if request.method == 'OPTIONS':
+        return jsonify({"success": True}), 200
+
+    try:
+        # 1. Get data from form (for image uploads) or JSON
+        data = request.get_json(silent=True) or request.form
+        
+        title = data.get('title')
+        description = data.get('description')
+        category = data.get('category')
+        link = data.get('link')
+        technologies = data.get('technologies')
+        
+        # 2. Image Logic: Check if a new file was uploaded
+        image_file = request.files.get('image')
+        image_url = data.get('image') # Keep existing if no new file
+
+        if image_file and image_file.filename:
+            from werkzeug.utils import secure_filename
+            import os
+            filename = secure_filename(image_file.filename)
+            upload_path = os.path.join('static', 'uploads')
+            os.makedirs(upload_path, exist_ok=True)
+            image_file.save(os.path.join(upload_path, filename))
+            image_url = f'/static/uploads/{filename}'
+
+        # 3. Update Database
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('''
+                    UPDATE projects 
+                    SET title=%s, description=%s, category=%s, image=%s, link=%s, technologies=%s 
+                    WHERE id=%s
+                ''', (title, description, category, image_url, link, technologies, project_id))
+                conn.commit()
+
+        return jsonify({"success": True, "message": "Project protocol updated."})
+
+    except Exception as e:
+        print(f"Update Error: {e}")
+        return jsonify({"success": False, "message": str(e)}), 500
+
+    
 
 # ... (AI Agent Routes follow the same Cursor pattern) ...
 
@@ -435,38 +511,6 @@ def ai_agent_chat():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
     
-
-'''client = genai.Client(api_key="AIzaSyC488SIhva4a4AEwLc7dWt_662KpGEHgZ8")
-
-@app.route('/api/agent/chat', methods=['POST', 'OPTIONS'])
-def ai_agent_chat():
-    if request.method == 'OPTIONS':
-        return jsonify({"status": "ok"}), 200
-    
-    data = request.get_json()
-    user_message = data.get('message')
-    
-    # Clean system instruction
-    system_instruction = "You are Akosua, the Neural Interface for KwesiCoder. Kwesi is a Systems Architect and IT student specializing in Python, React, and Flask. Answer questions about his expertise confidently and briefly."
-    
-    try:
-        # Change: Using 'gemini-1.5-flash' (latest stable ID)
-        # Change: Use content as a list for better parsing
-        response = client.models.generate_content(
-            model="gemini-1.5-flash",
-            config={'system_instruction': system_instruction},
-            contents=[user_message] 
-        )
-        
-        # Ensure we check for text before returning
-        if response.text:
-            return jsonify({"status": "success", "reply": response.text})
-        else:
-            return jsonify({"status": "error", "message": "Empty response from AI"}), 500
-
-    except Exception as e:
-        print(f"🔥 Detailed Error: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 500'''
 
 
 if __name__ == '__main__':
