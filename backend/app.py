@@ -16,6 +16,13 @@ load_dotenv()
 # === App Configuration ===
 app = Flask(__name__)
 app.secret_key = os.environ.get('FLASK_SECRET')
+app.config.update(
+    SESSION_COOKIE_SECURE=True,     # Must be True for HTTPS (Vercel)
+    SESSION_COOKIE_SAMESITE='None', # Required for cross-site cookie sharing
+    SESSION_COOKIE_HTTPONLY=True,
+    REMEMBER_COOKIE_SECURE=True,
+    REMEMBER_COOKIE_SAMESITE='None'
+)
 
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
