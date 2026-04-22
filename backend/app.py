@@ -24,7 +24,7 @@ app.config.update(
     REMEMBER_COOKIE_SAMESITE='None'
 )
 
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True, methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
 # === Database Configuration ===
 DB_URL = os.environ.get('DATABASE_URL')
