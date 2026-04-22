@@ -42,7 +42,7 @@ def init_db():
                     );
                     CREATE TABLE IF NOT EXISTS site_visits (
                         id SERIAL PRIMARY KEY,
-                        ip_address TEXT,
+                        ip_address TEXT UNIQUE,
                         visit_date DATE DEFAULT CURRENT_DATE
                     );
                     CREATE TABLE IF NOT EXISTS button_clicks (
@@ -140,24 +140,43 @@ def delete_message(id):
 
 @app.route('/api/visit_stats', methods=['GET'])
 def get_public_stats():
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute('SELECT COUNT(*) FROM site_visits')
-            count = cur.fetchone()[0]
-    return jsonify({'total_visits': count})
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute('SELECT COUNT(*) FROM site_visits')
+                count = cur.fetchone()[0]
+        return jsonify({'total_visitors': count})
+    except:
+        return jsonify({'total_visitors': 0})
+
 
 @app.route('/api/track_visit', methods=['POST'])
 def api_track_visit():
+    # Get the user's IP
     ip = request.headers.get('X-Forwarded-For', request.remote_addr)
-    with get_db() as conn:
-        with conn.cursor() as cur:
-            cur.execute('SELECT id FROM site_visits WHERE ip_address = %s AND visit_date = CURRENT_DATE', (ip,))
-            exists = cur.fetchone()
-            if not exists:
-                cur.execute('INSERT INTO site_visits (ip_address, visit_date) VALUES (%s, CURRENT_DATE)', (ip,))
+    if ip and ',' in ip:
+        ip = ip.split(',')[0]
+
+    try:
+        with get_db() as conn:
+            with conn.cursor() as cur:
+                # 'ON CONFLICT DO NOTHING' turns off the error if the IP exists
+                cur.execute('''
+                    INSERT INTO site_visits (ip_address) 
+                    VALUES (%s) 
+                    ON CONFLICT (ip_address) DO NOTHING
+                ''', (ip,))
                 conn.commit()
-                return jsonify({'status': 'success', 'message': 'New visit logged.'})
-    return jsonify({'status': 'success', 'message': 'Returning visitor.'})
+        
+        # We return success regardless because if it didn't insert, 
+        # it's because they are already a known visitor.
+        return jsonify({'status': 'success', 'message': 'Identity logged to neural grid.'})
+    except Exception as e:
+        print(f"Tracking Error: {e}")
+        return jsonify({'status': 'error'}), 500
+
+
+
 
 @app.route('/api/track_click', methods=['POST'])
 def api_track_click():
